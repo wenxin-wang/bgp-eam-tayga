@@ -1,0 +1,77 @@
+#!/bin/bash
+
+ip netns add ns-h1
+ip netns add ns-h2
+
+ip netns add ns-r1
+ip netns add ns-r2
+ip netns add ns-r3
+
+ip netns exec ns-r1 sysctl -w net.ipv6.conf.all.forwarding=1
+ip netns exec ns-r2 sysctl -w net.ipv6.conf.all.forwarding=1
+ip netns exec ns-r3 sysctl -w net.ipv6.conf.all.forwarding=1
+
+ip l add h1r1 type veth peer name r1h1
+ip l add h2r2 type veth peer name r2h2
+
+ip l add r1r2 type veth peer name r2r1
+ip l add r1r3 type veth peer name r3r1
+ip l add r2r3 type veth peer name r3r2
+
+ip l set h1r1 netns ns-h1
+ip l set h2r2 netns ns-h2
+
+ip l set r1h1 netns ns-r1
+ip l set r1r2 netns ns-r1
+ip l set r1r3 netns ns-r1
+
+ip l set r2h2 netns ns-r2
+ip l set r2r1 netns ns-r2
+ip l set r2r3 netns ns-r2
+
+ip l set r3r1 netns ns-r3
+ip l set r3r2 netns ns-r3
+
+ip netns exec ns-h1 ip l set h1r1 up
+ip netns exec ns-h2 ip l set h2r2 up
+
+ip netns exec ns-r1 ip l set r1h1 up
+ip netns exec ns-r1 ip l set r1r2 up
+ip netns exec ns-r1 ip l set r1r3 up
+
+ip netns exec ns-r2 ip l set r2h2 up
+ip netns exec ns-r2 ip l set r2r1 up
+ip netns exec ns-r2 ip l set r2r3 up
+
+ip netns exec ns-r3 ip l set r3r1 up
+ip netns exec ns-r3 ip l set r3r2 up
+
+ip netns exec ns-h1 ip a add 1::2/64 dev h1r1
+ip netns exec ns-h1 ip r add 2::/64 via 1::1
+ip netns exec ns-h1 ip r add 12::/64 via 1::1
+ip netns exec ns-h1 ip r add 13::/64 via 1::1
+ip netns exec ns-h1 ip r add 23::/64 via 1::1
+
+ip netns exec ns-h2 ip a add 2::2/64 dev h2r2
+ip netns exec ns-h2 ip r add 1::/64 via 2::1
+ip netns exec ns-h2 ip r add 12::/64 via 2::1
+ip netns exec ns-h2 ip r add 13::/64 via 2::1
+ip netns exec ns-h2 ip r add 23::/64 via 2::1
+
+ip netns exec ns-r1 ip a add 1::1/64 dev r1h1
+ip netns exec ns-r1 ip a add 12::1/64 dev r1r2
+ip netns exec ns-r1 ip a add 13::1/64 dev r1r3
+ip netns exec ns-r1 ip r add 23::/64 via 12::2
+ip netns exec ns-r1 ip r add 2::/64 via 12::2
+
+ip netns exec ns-r2 ip a add 2::1/64 dev r2h2
+ip netns exec ns-r2 ip a add 12::2/64 dev r2r1
+ip netns exec ns-r2 ip a add 23::2/64 dev r2r3
+ip netns exec ns-r2 ip r add 13::/64 via 12::1
+ip netns exec ns-r2 ip r add 1::/64 via 12::1
+
+ip netns exec ns-r3 ip a add 13::3/64 dev r3r1
+ip netns exec ns-r3 ip a add 23::3/64 dev r3r2
+ip netns exec ns-r3 ip r add 12::/64 via 13::1
+ip netns exec ns-r3 ip r add 1::/64 via 13::1
+ip netns exec ns-r3 ip r add 2::/64 via 23::2
