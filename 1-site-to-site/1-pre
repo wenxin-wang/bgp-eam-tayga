@@ -87,6 +87,8 @@ kill $(cat ./run/tayga-1.pid)
 kill $(cat ./run/tayga-2.pid)
 
 echo starting tayga for r1
+cp ./tayga-r1.pream.conf ./run/tayga-1.conf
+echo "map 128.0.0.0/24 EEEE::/120" >>./run/tayga-1.conf
 ip netns exec ns-r1 stdbuf -o0 valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all ../tayga/tayga -c $(pwd)/run/tayga-1.conf -d &>./run/tayga-1.log &
 # ip netns exec ns-r1 stdbuf -o0 ../tayga/tayga -c $(pwd)/run/tayga-1.conf -d &>./run/tayga-1.log &
 echo $! >./run/tayga-1.pid
@@ -97,6 +99,8 @@ ip netns exec ns-r1 ip r add 2001::/120 dev tayga1
 ip netns exec ns-r1 ip r add 2011::/120 dev tayga1
 
 echo starting tayga for r2
+cp ./tayga-r2.pream.conf ./run/tayga-2.conf
+echo "map 128.0.0.0/24 EEEE::/120" >>./run/tayga-2.conf
 ip netns exec ns-r2 stdbuf -o0 valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all ../tayga/tayga -c $(pwd)/run/tayga-2.conf -d &>./run/tayga-2.log &
 # ip netns exec ns-r2 stdbuf -o0 ../tayga/tayga -c $(pwd)/run/tayga-2.conf -d &>./run/tayga-2.log &
 echo $! >./run/tayga-2.pid
