@@ -1,0 +1,18 @@
+#!/bin/bash
+
+ip netns del ns-h1
+ip netns del ns-h2
+ip netns del ns-s
+
+ip netns del ns-r1
+ip netns del ns-r2
+ip netns del ns-r3
+ip netns del ns-r4
+
+ip l set br-sw down
+brctl delbr br-sw
+
+kill $(cat ./run/tayga-1.pid)
+kill $(cat ./run/tayga-2.pid)
+kill $(cat ./run/tayga-3.pid)
+kill $(cat ./run/tayga-4.pid)

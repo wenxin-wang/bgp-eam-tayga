@@ -1,0 +1,19 @@
+#!/bin/bash
+
+SESSION_NAME='bgp_eam_test'
+
+if ! tmux -q has-session -t ${SESSION_NAME} >/dev/null 2>&1; then
+    tmux new-session -s ${SESSION_NAME} -d
+else
+    echo "tmux ${SESSION_NAME} is already running"
+    exit 1
+fi
+
+tmux split-window -h -t ${SESSION_NAME}:0
+tmux split-window -h -t ${SESSION_NAME}:0.1
+
+tmux send-keys -t ${SESSION_NAME}:0.2 "sudo exabgp.daemon.user=root ip netns exec ns-x ../exabgp/sbin/exabgp exa-x.conf" C-m
+tmux send-keys -t ${SESSION_NAME}:0.0 "sudo exabgp.daemon.user=root ip netns exec ns-r1 ../exabgp/sbin/exabgp exa-r1.conf" C-m
+tmux send-keys -t ${SESSION_NAME}:0.1 "sudo exabgp.daemon.user=root ip netns exec ns-r2 ../exabgp/sbin/exabgp exa-r2.conf" C-m
+
+tmux attach-session -t ${SESSION_NAME}

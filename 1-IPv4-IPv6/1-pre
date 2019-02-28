@@ -1,0 +1,111 @@
+#!/bin/bash
+
+mkdir -p run
+
+ip netns add ns-h1
+ip netns add ns-h2
+
+ip netns add ns-x
+
+ip netns add ns-r1
+ip netns add ns-r2
+ip netns add ns-r3
+
+ip netns exec ns-x sysctl -w net.ipv4.conf.all.forwarding=1
+ip netns exec ns-x sysctl -w net.ipv6.conf.all.forwarding=1
+ip netns exec ns-r1 sysctl -w net.ipv6.conf.all.forwarding=1
+ip netns exec ns-r2 sysctl -w net.ipv6.conf.all.forwarding=1
+ip netns exec ns-r3 sysctl -w net.ipv6.conf.all.forwarding=1
+
+ip l add h1x type veth peer name xh1
+
+ip l add xr1 type veth peer name r1x
+ip l add xr2 type veth peer name r2x
+ip l add h2r3 type veth peer name r3h2
+
+ip l add r1r3 type veth peer name r3r1
+ip l add r2r3 type veth peer name r3r2
+
+ip l set h1x netns ns-h1
+
+ip l set xh1 netns ns-x
+ip l set xr1 netns ns-x
+ip l set xr2 netns ns-x
+
+ip l set h2r3 netns ns-h2
+
+ip l set r1x netns ns-r1
+ip l set r1r3 netns ns-r1
+
+ip l set r2x netns ns-r2
+ip l set r2r3 netns ns-r2
+
+ip l set r3h2 netns ns-r3
+ip l set r3r1 netns ns-r3
+ip l set r3r2 netns ns-r3
+
+ip netns exec ns-h1 ip l set lo up
+ip netns exec ns-h1 ip l set h1x up
+
+ip netns exec ns-x ip l set xh1 up
+ip netns exec ns-x ip l set xr1 up
+ip netns exec ns-x ip l set xr2 up
+ip netns exec ns-h2 ip l set h2r3 up
+ip netns exec ns-h2 ip l set lo up
+
+ip netns exec ns-r1 ip l set r1x up
+ip netns exec ns-r1 ip l set r1r3 up
+
+ip netns exec ns-r2 ip l set r2x up
+ip netns exec ns-r2 ip l set r2r3 up
+
+ip netns exec ns-r3 ip l set r3h2 up
+ip netns exec ns-r3 ip l set r3r1 up
+ip netns exec ns-r3 ip l set r3r2 up
+
+ip netns exec ns-h1 ip a add 10.0.1.2/24 dev h1x
+ip netns exec ns-h1 ip r add 10.0.2.0/24 via 10.0.1.1
+
+ip netns exec ns-h2 ip a add 2222::a00:202/126 dev h2r3
+ip netns exec ns-h2 ip r add 1111::/96 via 2222::a00:201
+ip netns exec ns-h2 ip r add 1122::/96 via 2222::a00:201
+
+ip netns exec ns-x ip a add 10.0.1.1/24 dev xh1
+ip netns exec ns-x ip a add 2001::f/64 dev xr1
+ip netns exec ns-x ip a add 2002::f/64 dev xr2
+ip netns exec ns-x ip r add 2222::/96 via 2001::1
+ip netns exec ns-x ip r add 2222::/96 via 2002::2 metric 20
+
+ip netns exec ns-r1 ip a add 2001::1/64 dev r1x
+ip netns exec ns-r1 ip a add 2013::1/64 dev r1r3
+ip netns exec ns-r1 ip r add 1111::/96 via 2001::f
+ip netns exec ns-r1 ip r add 2002::/64 via 2001::f
+ip netns exec ns-r1 ip r add 2222::/96 via 2013::3
+
+ip netns exec ns-r2 ip a add 2002::2/64 dev r2x
+ip netns exec ns-r2 ip a add 2023::2/64 dev r2r3
+ip netns exec ns-r2 ip r add 1122::/96 via 2002::f
+ip netns exec ns-r2 ip r add 2001::/64 via 2002::f
+ip netns exec ns-r2 ip r add 2222::/96 via 2023::3
+
+ip netns exec ns-r3 ip a add 2222::a00:201/126 dev r3h2
+ip netns exec ns-r3 ip a add 2013::3/64 dev r3r1
+ip netns exec ns-r3 ip a add 2023::3/64 dev r3r2
+ip netns exec ns-r3 ip r add 1111::/96 via 2013::1
+ip netns exec ns-r3 ip r add 1122::/96 via 2023::2
+
+touch ./run/tayga-x.pid
+kill $(cat ./run/tayga-x.pid)
+
+echo starting tayga for x
+cp ./tayga-x.pream.conf ./run/tayga-x.conf
+echo "map 128.0.0.0/24 EEEE::/120" >>./run/tayga-x.conf
+ip netns exec ns-x stdbuf -o0 valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all ../tayga/tayga -c $(pwd)/run/tayga-x.conf -d &>./run/tayga-x.log &
+# ip netns exec ns-r1 stdbuf -o0 ../tayga/tayga -c $(pwd)/run/tayga-1.conf -d &>./run/tayga-1.log &
+echo $! >./run/tayga-x.pid
+sleep 0.5
+ip netns exec ns-x ip l set taygax up
+ip netns exec ns-x ip r add 10.0.2.0/24 dev taygax
+ip netns exec ns-x ip r add 1111::/96 dev taygax
+ip netns exec ns-x ip r add 1122::/96 dev taygax
+echo done

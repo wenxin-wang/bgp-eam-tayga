@@ -6,8 +6,8 @@ import time
 from tayga import Tayga
 
 
-with open(Tayga.exapath("./tayga-r1.pream.conf")) as fd:
-    tayga1_pream = "".join(fd.readlines())
+with open(Tayga.exapath("./tayga-r2.pream.conf")) as fd:
+    tayga2_pream = "".join(fd.readlines())
 
 
 map_rules = {}
@@ -25,8 +25,8 @@ try:
             sys.stderr.flush()
             if map_rules:
                 map_rules = dict(map_rules)
-                Tayga.gen_conf("./run/tayga-1.conf", tayga1_pream, map_rules)
-                Tayga.reload("./run/tayga-1.pid")
+                Tayga.gen_conf("./run/tayga-2.conf", tayga2_pream, map_rules)
+                Tayga.reload("./run/tayga-2.pid")
         elif 'announced' in line:
             tokens = line.split(' ')
             map_rules[tokens[5]] = tokens[6]

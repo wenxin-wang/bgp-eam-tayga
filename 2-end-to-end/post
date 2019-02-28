@@ -1,8 +1,0 @@
-#!/bin/bash
-
-ip netns del ns-h1
-ip netns del ns-h2
-
-ip netns del ns-r1
-ip netns del ns-r2
-ip netns del ns-r3

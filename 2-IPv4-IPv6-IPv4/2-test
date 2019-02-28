@@ -11,7 +11,7 @@ fi
 
 tmux split-window -h -t ${SESSION_NAME}:0
 
-tmux send-keys -t ${SESSION_NAME}:0.0 "sudo exabgp.daemon.user=root ip netns exec ns-r1 ../exabgp/sbin/exabgp exa-r1.conf" C-m
-tmux send-keys -t ${SESSION_NAME}:0.1 "sudo exabgp.daemon.user=root ip netns exec ns-r2 ../exabgp/sbin/exabgp exa-r2.conf" C-m
+tmux send-keys -t ${SESSION_NAME}:0.0 "sudo exabgp.daemon.user=root ip netns exec ns-r2 ../exabgp/sbin/exabgp exa-r2.conf" C-m
+tmux send-keys -t ${SESSION_NAME}:0.1 "sudo exabgp.daemon.user=root ip netns exec ns-r4 ../exabgp/sbin/exabgp exa-r4.conf" C-m
 
 tmux attach-session -t ${SESSION_NAME}
