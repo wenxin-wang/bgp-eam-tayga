@@ -1,0 +1,572 @@
+From 86b86960e8971cf5187b6d45289f7e814b48d148 Mon Sep 17 00:00:00 2001
+From: Wenxin Wang <i@wenxinwang.me>
+Date: Sat, 2 Mar 2019 15:29:07 +0800
+Subject: [PATCH 2/2] support config file reloading
+
+for changing xlat rules at run time
+---
+ addrmap.c  |  40 ++++++-------
+ conffile.c | 163 +++++++++++++++++++++++++++++++----------------------
+ dynamic.c  |   4 +-
+ tayga.c    |  11 ++--
+ tayga.h    |   9 +--
+ 5 files changed, 131 insertions(+), 96 deletions(-)
+
+diff --git a/addrmap.c b/addrmap.c
+index 9ee945a..1611ce2 100644
+--- a/addrmap.c
++++ b/addrmap.c
+@@ -164,42 +164,42 @@ static void add_to_hash_table(struct cache_entry *c, uint32_t hash4,
+ 	list_add(&c->hash6, &gcfg->hash_table6[hash6]);
+ }
+ 
+-void create_cache(void)
++void create_cache(struct config *cfg)
+ {
+-	int i, hash_size = 1 << gcfg->hash_bits;
++	int i, hash_size = 1 << cfg->hash_bits;
+ 	struct list_head *entry;
+ 	struct cache_entry *c;
+ 
+-	if (gcfg->hash_table4) {
+-		free(gcfg->hash_table4);
+-		free(gcfg->hash_table6);
++	if (cfg->hash_table4) {
++		free(cfg->hash_table4);
++		free(cfg->hash_table6);
+ 	}
+ 
+-	gcfg->hash_table4 = (struct list_head *)
++	cfg->hash_table4 = (struct list_head *)
+ 				malloc(hash_size * sizeof(struct list_head));
+-	gcfg->hash_table6 = (struct list_head *)
++	cfg->hash_table6 = (struct list_head *)
+ 				malloc(hash_size * sizeof(struct list_head));
+-	if (!gcfg->hash_table4 || !gcfg->hash_table6) {
++	if (!cfg->hash_table4 || !cfg->hash_table6) {
+ 		slog(LOG_CRIT, "unable to allocate %d bytes for hash table\n",
+ 				hash_size * sizeof(struct list_head));
+ 		exit(1);
+ 	}
+ 	for (i = 0; i < hash_size; ++i) {
+-		INIT_LIST_HEAD(&gcfg->hash_table4[i]);
+-		INIT_LIST_HEAD(&gcfg->hash_table6[i]);
++		INIT_LIST_HEAD(&cfg->hash_table4[i]);
++		INIT_LIST_HEAD(&cfg->hash_table6[i]);
+ 	}
+ 
+-	if (list_empty(&gcfg->cache_pool) && list_empty(&gcfg->cache_active)) {
+-		gcfg->cache_start = c = calloc(gcfg->cache_size, sizeof(struct cache_entry));
+-		for (i = 0; i < gcfg->cache_size; ++i) {
++	if (list_empty(&cfg->cache_pool) && list_empty(&cfg->cache_active)) {
++		cfg->cache_start = c = calloc(cfg->cache_size, sizeof(struct cache_entry));
++		for (i = 0; i < cfg->cache_size; ++i) {
+ 			INIT_LIST_HEAD(&c->list);
+ 			INIT_LIST_HEAD(&c->hash4);
+ 			INIT_LIST_HEAD(&c->hash6);
+-			list_add_tail(&c->list, &gcfg->cache_pool);
++			list_add_tail(&c->list, &cfg->cache_pool);
+ 			++c;
+ 		}
+ 	} else {
+-		list_for_each(entry, &gcfg->cache_active) {
++		list_for_each(entry, &cfg->cache_active) {
+ 			c = list_entry(entry, struct cache_entry, list);
+ 			INIT_LIST_HEAD(&c->hash4);
+ 			INIT_LIST_HEAD(&c->hash6);
+@@ -267,12 +267,12 @@ struct map6 *find_map6(const struct in6_addr *addr6)
+ 	return NULL;
+ }
+ 
+-int insert_map4(struct map4 *m, struct map4 **conflict)
++int insert_map4(struct config *cfg, struct map4 *m, struct map4 **conflict)
+ {
+ 	struct list_head *entry;
+ 	struct map4 *s;
+ 
+-	list_for_each(entry, &gcfg->map4_list) {
++	list_for_each(entry, &cfg->map4_list) {
+ 		s = list_entry(entry, struct map4, list);
+ 		if (s->prefix_len < m->prefix_len)
+ 			break;
+@@ -289,12 +289,12 @@ conflict:
+ 	return -1;
+ }
+ 
+-int insert_map6(struct map6 *m, struct map6 **conflict)
++int insert_map6(struct config *cfg, struct map6 *m, struct map6 **conflict)
+ {
+ 	struct list_head *entry, *insert_pos = NULL;
+ 	struct map6 *s;
+ 
+-	list_for_each(entry, &gcfg->map6_list) {
++	list_for_each(entry, &cfg->map6_list) {
+ 		s = list_entry(entry, struct map6, list);
+ 		if (s->prefix_len < m->prefix_len) {
+ 			if (IN6_IS_IN_NET(&m->addr, &s->addr, &s->mask))
+@@ -306,7 +306,7 @@ int insert_map6(struct map6 *m, struct map6 **conflict)
+ 				goto conflict;
+ 		}
+ 	}
+-	list_add_tail(&m->list, insert_pos ? insert_pos : &gcfg->map6_list);
++	list_add_tail(&m->list, insert_pos ? insert_pos : &cfg->map6_list);
+ 	return 0;
+ 
+ conflict:
+diff --git a/conffile.c b/conffile.c
+index f745c66..144bcd5 100644
+--- a/conffile.c
++++ b/conffile.c
+@@ -111,43 +111,43 @@ static void abort_on_conflict6(char *msg, int ln, struct map6 *old)
+ 	exit(1);
+ }
+ 
+-static void config_ipv4_addr(int ln, int arg_count, char **args)
++static void config_ipv4_addr(int ln, struct config *cfg, int arg_count, char **args)
+ {
+-	if (gcfg->local_addr4.s_addr) {
++	if (cfg->local_addr4.s_addr) {
+ 		slog(LOG_CRIT, "Error: duplicate ipv4-addr directive on "
+ 				"line %d\n", ln);
+ 		exit(1);
+ 	}
+-	if (!inet_pton(AF_INET, args[0], &gcfg->local_addr4)) {
++	if (!inet_pton(AF_INET, args[0], &cfg->local_addr4)) {
+ 		slog(LOG_CRIT, "Expected an IPv4 address but found \"%s\" on "
+ 				"line %d\n", args[0], ln);
+ 		exit(1);
+ 	}
+-	if (validate_ip4_addr(&gcfg->local_addr4) < 0) {
++	if (validate_ip4_addr(&cfg->local_addr4) < 0) {
+ 		slog(LOG_CRIT, "Cannot use reserved address %s in ipv4-addr "
+ 				"directive, aborting...\n", args[0]);
+ 		exit(1);
+ 	}
+ }
+ 
+-static void config_ipv6_addr(int ln, int arg_count, char **args)
++static void config_ipv6_addr(int ln, struct config *cfg, int arg_count, char **args)
+ {
+-	if (gcfg->local_addr6.s6_addr[0]) {
++	if (cfg->local_addr6.s6_addr[0]) {
+ 		slog(LOG_CRIT, "Error: duplicate ipv6-addr directive on line "
+ 				"%d\n", ln);
+ 		exit(1);
+ 	}
+-	if (!inet_pton(AF_INET6, args[0], &gcfg->local_addr6)) {
++	if (!inet_pton(AF_INET6, args[0], &cfg->local_addr6)) {
+ 		slog(LOG_CRIT, "Expected an IPv6 address but found \"%s\" on "
+ 				"line %d\n", args[0], ln);
+ 		exit(1);
+ 	}
+-	if (validate_ip6_addr(&gcfg->local_addr6) < 0) {
++	if (validate_ip6_addr(&cfg->local_addr6) < 0) {
+ 		slog(LOG_CRIT, "Cannot use reserved address %s in ipv6-addr "
+ 				"directive, aborting...\n", args[0]);
+ 		exit(1);
+ 	}
+-	if (gcfg->local_addr6.s6_addr32[0] == WKPF) {
++	if (cfg->local_addr6.s6_addr32[0] == WKPF) {
+ 		slog(LOG_CRIT, "Error: ipv6-addr directive cannot contain an "
+ 				"address in the Well-Known Prefix "
+ 				"(64:ff9b::/96)\n");
+@@ -155,7 +155,7 @@ static void config_ipv6_addr(int ln, int arg_count, char **args)
+ 	}
+ }
+ 
+-static void config_prefix(int ln, int arg_count, char **args)
++static void config_prefix(int ln, struct config *cfg, int arg_count, char **args)
+ {
+ 	struct map_static *m;
+ 	struct map6 *m6;
+@@ -185,31 +185,31 @@ static void config_prefix(int ln, int arg_count, char **args)
+ 				"or 96 only, aborting...\n");
+ 		exit(1);
+ 	}
+-	if (insert_map4(&m->map4, NULL) < 0) {
++	if (insert_map4(cfg, &m->map4, NULL) < 0) {
+ 		slog(LOG_CRIT, "Error: duplicate prefix directive on line %d\n",
+ 				ln);
+ 		exit(1);
+ 	}
+-	if (insert_map6(&m->map6, &m6) < 0)
++	if (insert_map6(cfg, &m->map6, &m6) < 0)
+ 		abort_on_conflict6("Error: NAT64 prefix", ln, m6);
+ }
+ 
+-static void config_tun_device(int ln, int arg_count, char **args)
++static void config_tun_device(int ln, struct config *cfg, int arg_count, char **args)
+ {
+-	if (gcfg->tundev[0]) {
++	if (cfg->tundev[0]) {
+ 		slog(LOG_CRIT, "Error: duplicate tun-device directive on line "
+ 				"%d\n", ln);
+ 		exit(1);
+ 	}
+-	if (strlen(args[0]) + 1 > sizeof(gcfg->tundev)) {
++	if (strlen(args[0]) + 1 > sizeof(cfg->tundev)) {
+ 		slog(LOG_CRIT, "Device name \"%s\" is invalid on line %d\n",
+ 				args[0], ln);
+ 		exit(1);
+ 	}
+-	strcpy(gcfg->tundev, args[0]);
++	strcpy(cfg->tundev, args[0]);
+ }
+ 
+-static void config_map(int ln, int arg_count, char **args)
++static void config_map(int ln, struct config *cfg, int arg_count, char **args)
+ {
+ 	struct map_static *m;
+ 	struct map4 *m4;
+@@ -269,20 +269,20 @@ static void config_map(int ln, int arg_count, char **args)
+ 				"64:ff9b::/96, aborting...\n");
+ 		exit(1);
+ 	}
+-	if (insert_map4(&m->map4, &m4) < 0)
++	if (insert_map4(cfg, &m->map4, &m4) < 0)
+ 		abort_on_conflict4("Error: IPv4 address in map directive",
+ 				ln, m4);
+-	if (insert_map6(&m->map6, &m6) < 0)
++	if (insert_map6(cfg, &m->map6, &m6) < 0)
+ 		abort_on_conflict6("Error: IPv6 address in map directive",
+ 				ln, m6);
+ }
+ 
+-static void config_dynamic_pool(int ln, int arg_count, char **args)
++static void config_dynamic_pool(int ln, struct config *cfg, int arg_count, char **args)
+ {
+ 	struct dynamic_pool *pool;
+ 	struct map4 *m4;
+ 
+-	if (gcfg->dynamic_pool) {
++	if (cfg->dynamic_pool) {
+ 		slog(LOG_CRIT, "Error: duplicate dynamic-pool directive on "
+ 				"line %d\n", ln);
+ 		exit(1);
+@@ -318,7 +318,7 @@ static void config_dynamic_pool(int ln, int arg_count, char **args)
+ 			       "dynamic-pool directive, aborting...\n");
+ 		exit(1);
+ 	}
+-	if (insert_map4(&pool->map4, &m4) < 0)
++	if (insert_map4(cfg, &pool->map4, &m4) < 0)
+ 		abort_on_conflict4("Error: IPv4 prefix in dynamic-pool "
+ 				"directive", ln, m4);
+ 
+@@ -327,12 +327,12 @@ static void config_dynamic_pool(int ln, int arg_count, char **args)
+ 	INIT_LIST_HEAD(&pool->free_head.list);
+ 	list_add(&pool->free_head.list, &pool->free_list);
+ 
+-	gcfg->dynamic_pool = pool;
++	cfg->dynamic_pool = pool;
+ }
+ 
+-static void config_data_dir(int ln, int arg_count, char **args)
++static void config_data_dir(int ln, struct config *cfg, int arg_count, char **args)
+ {
+-	if (gcfg->data_dir[0]) {
++	if (cfg->data_dir[0]) {
+ 		slog(LOG_CRIT, "Error: duplicate data-dir directive on line "
+ 				"%d\n", ln);
+ 		exit(1);
+@@ -341,18 +341,18 @@ static void config_data_dir(int ln, int arg_count, char **args)
+ 		slog(LOG_CRIT, "Error: data-dir must be an absolute path\n");
+ 		exit(1);
+ 	}
+-	strcpy(gcfg->data_dir, args[0]);
++	strcpy(cfg->data_dir, args[0]);
+ }
+ 
+-static void config_strict_fh(int ln, int arg_count, char **args)
++static void config_strict_fh(int ln, struct config *cfg, int arg_count, char **args)
+ {
+ 	if (!strcasecmp(args[0], "true") || !strcasecmp(args[0], "on") ||
+ 			!strcasecmp(args[0], "1")) {
+-		gcfg->lazy_frag_hdr = 0;
++		cfg->lazy_frag_hdr = 0;
+ 	} else if (!strcasecmp(args[0], "false") ||
+ 			!strcasecmp(args[0], "off") ||
+ 			!strcasecmp(args[0], "0")) {
+-		gcfg->lazy_frag_hdr = 1;
++		cfg->lazy_frag_hdr = 1;
+ 	} else {
+ 		slog(LOG_CRIT, "Error: invalid value for strict-frag-hdr\n");
+ 		exit(1);
+@@ -361,7 +361,7 @@ static void config_strict_fh(int ln, int arg_count, char **args)
+ 
+ struct {
+ 	char *name;
+-	void (*config_func)(int ln, int arg_count, char **args);
++	void (*config_func)(int ln, struct config*, int arg_count, char **args);
+ 	int need_args;
+ } config_directives[] = {
+ 	{ "ipv4-addr", config_ipv4_addr, 1 },
+@@ -375,8 +375,9 @@ struct {
+ 	{ NULL, NULL, 0 }
+ };
+ 
+-void read_config(char *conffile)
++struct config *load_config(const char *conffile)
+ {
++	struct config *cfg = NULL;
+ 	FILE *in;
+ 	int ln = 0;
+ 	char line[512];
+@@ -390,23 +391,23 @@ void read_config(char *conffile)
+ 	struct map4 *m4;
+ 	struct map6 *m6;
+ 
+-	gcfg = (struct config *)malloc(sizeof(struct config));
+-	if (!gcfg)
++	cfg = (struct config *)malloc(sizeof(struct config));
++	if (!cfg)
+ 		goto malloc_fail;
+-	memset(gcfg, 0, sizeof(struct config));
+-	gcfg->recv_buf_size = 65536 + sizeof(struct tun_pi);
+-	INIT_LIST_HEAD(&gcfg->map4_list);
+-	INIT_LIST_HEAD(&gcfg->map6_list);
+-	gcfg->dyn_min_lease = 7200 + 4 * 60; /* just over two hours */
+-	gcfg->dyn_max_lease = 14 * 86400;
+-	gcfg->max_commit_delay = gcfg->dyn_max_lease / 4;
+-	gcfg->hash_bits = 7;
+-	gcfg->cache_size = 8192;
+-	gcfg->allow_ident_gen = 1;
+-	gcfg->ipv6_offlink_mtu = 1280;
+-	gcfg->lazy_frag_hdr = 1;
+-	INIT_LIST_HEAD(&gcfg->cache_pool);
+-	INIT_LIST_HEAD(&gcfg->cache_active);
++	memset(cfg, 0, sizeof(struct config));
++	cfg->recv_buf_size = 65536 + sizeof(struct tun_pi);
++	INIT_LIST_HEAD(&cfg->map4_list);
++	INIT_LIST_HEAD(&cfg->map6_list);
++	cfg->dyn_min_lease = 7200 + 4 * 60; /* just over two hours */
++	cfg->dyn_max_lease = 14 * 86400;
++	cfg->max_commit_delay = cfg->dyn_max_lease / 4;
++	cfg->hash_bits = 7;
++	cfg->cache_size = 8192;
++	cfg->allow_ident_gen = 1;
++	cfg->ipv6_offlink_mtu = 1280;
++	cfg->lazy_frag_hdr = 1;
++	INIT_LIST_HEAD(&cfg->cache_pool);
++	INIT_LIST_HEAD(&cfg->cache_active);
+ 
+ 	in = fopen(conffile, "r");
+ 	if (!in) {
+@@ -451,36 +452,36 @@ void read_config(char *conffile)
+ 					"line %d\n", ln);
+ 			exit(1);
+ 		}
+-		config_directives[i].config_func(ln, arg_count, &args[1]);
++		config_directives[i].config_func(ln, cfg, arg_count, &args[1]);
+ 	}
+ 	fclose(in);
+ 
+-	if (list_empty(&gcfg->map6_list)) {
++	if (list_empty(&cfg->map6_list)) {
+ 		slog(LOG_CRIT, "Error: no translation maps or NAT64 prefix "
+ 				"configured\n");
+ 		exit(1);
+ 	}
+ 
+-	m4 = list_entry(gcfg->map4_list.next, struct map4, list);
+-	m6 = list_entry(gcfg->map6_list.next, struct map6, list);
++	m4 = list_entry(cfg->map4_list.next, struct map4, list);
++	m6 = list_entry(cfg->map6_list.next, struct map6, list);
+ 
+ 	if (m4->type == MAP_TYPE_RFC6052 && m6->type == MAP_TYPE_RFC6052 &&
+-			!gcfg->allow_ident_gen)
+-		gcfg->cache_size = 0;
++			!cfg->allow_ident_gen)
++		cfg->cache_size = 0;
+ 
+-	if (!gcfg->local_addr4.s_addr) {
++	if (!cfg->local_addr4.s_addr) {
+ 		slog(LOG_CRIT, "Error: no ipv4-addr directive found\n");
+ 		exit(1);
+ 	}
+ 
+ 	m = alloc_map_static(0);
+-	m->map4.addr = gcfg->local_addr4;
+-	if (insert_map4(&m->map4, &m4) < 0)
++	m->map4.addr = cfg->local_addr4;
++	if (insert_map4(cfg, &m->map4, &m4) < 0)
+ 		abort_on_conflict4("Error: ipv4-addr", 0, m4);
+ 
+-	if (gcfg->local_addr6.s6_addr32[0]) {
+-		m->map6.addr = gcfg->local_addr6;
+-		if (insert_map6(&m->map6, &m6) < 0) {
++	if (cfg->local_addr6.s6_addr32[0]) {
++		m->map6.addr = cfg->local_addr6;
++		if (insert_map6(cfg, &m->map6, &m6) < 0) {
+ 			if (m6->type == MAP_TYPE_RFC6052) {
+ 				inet_ntop(AF_INET6, &m6->addr,
+ 						addrbuf, sizeof(addrbuf));
+@@ -494,14 +495,14 @@ void read_config(char *conffile)
+ 			}
+ 		}
+ 	} else {
+-		m6 = list_entry(gcfg->map6_list.prev, struct map6, list);
++		m6 = list_entry(cfg->map6_list.prev, struct map6, list);
+ 		if (m6->type != MAP_TYPE_RFC6052) {
+ 			slog(LOG_CRIT, "Error: ipv6-addr directive must be "
+ 					"specified if no NAT64 prefix is "
+ 					"configured\n");
+ 			exit(1);
+ 		}
+-		if (append_to_prefix(&gcfg->local_addr6, &gcfg->local_addr4,
++		if (append_to_prefix(&cfg->local_addr6, &cfg->local_addr4,
+ 					&m6->addr, m6->prefix_len)) {
+ 			slog(LOG_CRIT, "Error: ipv6-addr directive must be "
+ 					"specified if prefix is 64:ff9b::/96 "
+@@ -509,13 +510,25 @@ void read_config(char *conffile)
+ 					"(RFC 1918) address\n");
+ 			exit(1);
+ 		}
+-		m->map6.addr = gcfg->local_addr6;
++		m->map6.addr = cfg->local_addr6;
+ 	}
+-	return;
++
++	if (cfg->cache_size)
++		create_cache(cfg);
++	return cfg;
+ 
+ malloc_fail:
+-	slog(LOG_CRIT, "Unable to allocate config memory\n");
+-	exit(1);
++	return NULL;
++}
++
++void read_config(const char *conffile)
++{
++	gcfg = load_config(conffile);
++
++	if (!gcfg) {
++		slog(LOG_CRIT, "Unable to allocate config memory\n");
++		exit(1);
++	}
+ }
+ 
+ void free_config(struct config* cfg)
+@@ -536,10 +549,28 @@ void free_config(struct config* cfg)
+ 		dynamic_free(cfg->dynamic_pool);
+ 
+ 	free_cache(cfg);
+-	free(cfg->recv_buf);
+ 	free(cfg);
+ }
+ 
++void reload_config(const char *conffile)
++{
++	struct config *cfg, *ogcfg;
++	cfg = load_config(conffile);
++
++	if (!cfg) {
++		slog(LOG_ALERT, "Unable to allocate config memory while reloading static map\n");
++		return;
++	}
++	cfg->recv_buf = gcfg->recv_buf;
++	cfg->tun_fd = gcfg->tun_fd;
++	cfg->mtu = gcfg->mtu;
++	memcpy(cfg->rand, gcfg->rand, sizeof(gcfg->rand));
++
++	ogcfg = gcfg;
++	gcfg = cfg;
++	free_config(ogcfg);
++}
++
+ /*
+ Local Variables:
+ c-basic-offset: 8
+diff --git a/dynamic.c b/dynamic.c
+index 8963130..c3a0931 100644
+--- a/dynamic.c
++++ b/dynamic.c
+@@ -60,8 +60,8 @@ static struct map_dynamic *alloc_map_dynamic(const struct in6_addr *addr6,
+ 
+ static void move_to_mapped(struct map_dynamic *d, struct dynamic_pool *pool)
+ {
+-	insert_map4(&d->map4, NULL);
+-	insert_map6(&d->map6, NULL);
++	insert_map4(gcfg, &d->map4, NULL);
++	insert_map6(gcfg, &d->map6, NULL);
+ 	list_add(&d->list, &pool->mapped_list);
+ }
+ 
+diff --git a/tayga.c b/tayga.c
+index c5d8d24..93be3bb 100644
+--- a/tayga.c
++++ b/tayga.c
+@@ -39,6 +39,7 @@ time_t now;
+ 
+ static int signalfds[2];
+ static int use_stdout;
++static char *conffile = TAYGA_CONF_PATH;
+ 
+ void slog(int priority, const char *format, ...)
+ {
+@@ -245,9 +246,15 @@ static void read_from_signalfd(void)
+ 			slog(LOG_CRIT, "signal fd was closed\n");
+ 			exit(1);
+ 		}
++		if (sig == SIGUSR2) {
++			slog(LOG_NOTICE, "reloading static map on signal %d\n", sig);
++			reload_config(conffile);
++			return;
++		}
+ 		if (gcfg->dynamic_pool)
+ 			dynamic_maint(gcfg->dynamic_pool, 1);
+ 		slog(LOG_NOTICE, "exiting on signal %d\n", sig);
++		free(gcfg->recv_buf);
+ 		free_config(gcfg);
+ 		exit(0);
+ 	}
+@@ -261,7 +268,6 @@ int main(int argc, char **argv)
+ 	struct map6 *m6;
+ 	char addrbuf[INET6_ADDRSTRLEN];
+ 
+-	char *conffile = TAYGA_CONF_PATH;
+ 	char *user = NULL;
+ 	char *group = NULL;
+ 	char *pidfile = NULL;
+@@ -521,9 +527,6 @@ int main(int argc, char **argv)
+ 					"persistent.\n", conffile);
+ 	}
+ 
+-	if (gcfg->cache_size)
+-		create_cache();
+-
+ 	gcfg->recv_buf = (uint8_t *)malloc(gcfg->recv_buf_size);
+ 	if (!gcfg->recv_buf) {
+ 		slog(LOG_CRIT, "Error: unable to allocate %d bytes for "
+diff --git a/tayga.h b/tayga.h
+index a670d45..1f7b925 100644
+--- a/tayga.h
++++ b/tayga.h
+@@ -255,10 +255,10 @@ int validate_ip6_addr(const struct in6_addr *a);
+ int is_private_ip4_addr(const struct in_addr *a);
+ int calc_ip4_mask(struct in_addr *mask, const struct in_addr *addr, int len);
+ int calc_ip6_mask(struct in6_addr *mask, const struct in6_addr *addr, int len);
+-void create_cache(void);
++void create_cache(struct config *cfg);
+ void free_cache(struct config *cfg);
+-int insert_map4(struct map4 *m, struct map4 **conflict);
+-int insert_map6(struct map6 *m, struct map6 **conflict);
++int insert_map4(struct config *cfg, struct map4 *m, struct map4 **conflict);
++int insert_map6(struct config *cfg, struct map6 *m, struct map6 **conflict);
+ struct map4 *find_map4(const struct in_addr *addr4);
+ struct map6 *find_map6(const struct in6_addr *addr6);
+ int append_to_prefix(struct in6_addr *addr6, const struct in_addr *addr4,
+@@ -270,8 +270,9 @@ int map_ip6_to_ip4(struct in_addr *addr4, const struct in6_addr *addr6,
+ void addrmap_maint(void);
+ 
+ /* conffile.c */
+-void read_config(char *conffile);
++void read_config(const char *conffile);
+ void free_config(struct config *cfg);
++void reload_config(const char *conffile);
+ 
+ /* dynamic.c */
+ struct map6 *assign_dynamic(const struct in6_addr *addr6);
+-- 
+2.21.0
+

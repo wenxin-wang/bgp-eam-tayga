@@ -1,0 +1,157 @@
+From b1ff91d81c93ccc13d8008293682a84843b7b19b Mon Sep 17 00:00:00 2001
+From: Wenxin Wang <i@wenxinwang.me>
+Date: Sat, 2 Mar 2019 15:25:36 +0800
+Subject: [PATCH 1/2] fix memleak
+
+---
+ addrmap.c  | 15 ++++++++++++++-
+ conffile.c | 22 ++++++++++++++++++++++
+ dynamic.c  | 21 +++++++++++++++++++++
+ tayga.c    |  1 +
+ tayga.h    |  4 ++++
+ 5 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/addrmap.c b/addrmap.c
+index fff8d32..9ee945a 100644
+--- a/addrmap.c
++++ b/addrmap.c
+@@ -190,7 +190,7 @@ void create_cache(void)
+ 	}
+ 
+ 	if (list_empty(&gcfg->cache_pool) && list_empty(&gcfg->cache_active)) {
+-		c = calloc(gcfg->cache_size, sizeof(struct cache_entry));
++		gcfg->cache_start = c = calloc(gcfg->cache_size, sizeof(struct cache_entry));
+ 		for (i = 0; i < gcfg->cache_size; ++i) {
+ 			INIT_LIST_HEAD(&c->list);
+ 			INIT_LIST_HEAD(&c->hash4);
+@@ -209,6 +209,19 @@ void create_cache(void)
+ 	}
+ }
+ 
++void free_cache(struct config *cfg)
++{
++	if (!cfg->cache_size)
++		return;
++
++	free(cfg->hash_table4);
++	free(cfg->hash_table6);
++	cfg->hash_table4 = NULL;
++	cfg->hash_table6 = NULL;
++
++	free(cfg->cache_start);
++}
++
+ static struct cache_entry *cache_insert(const struct in_addr *addr4,
+ 		const struct in6_addr *addr6,
+ 		uint32_t hash4, uint32_t hash6)
+diff --git a/conffile.c b/conffile.c
+index 6c4414f..f745c66 100644
+--- a/conffile.c
++++ b/conffile.c
+@@ -518,6 +518,28 @@ malloc_fail:
+ 	exit(1);
+ }
+ 
++void free_config(struct config* cfg)
++{
++	struct list_head *entry, *next;
++	struct map4 *m4;
++	struct map_static *map;
++
++	list_for_each_safe(entry, next, &cfg->map4_list) {
++		m4 = list_entry(entry, struct map4, list);
++		if (m4->type != MAP_TYPE_DYNAMIC_POOL && m4->type != MAP_TYPE_DYNAMIC_HOST) {
++			map = container_of(m4, struct map_static, map4);
++			free(map);
++		}
++	}
++
++	if (cfg->dynamic_pool)
++		dynamic_free(cfg->dynamic_pool);
++
++	free_cache(cfg);
++	free(cfg->recv_buf);
++	free(cfg);
++}
++
+ /*
+ Local Variables:
+ c-basic-offset: 8
+diff --git a/dynamic.c b/dynamic.c
+index 830b227..8963130 100644
+--- a/dynamic.c
++++ b/dynamic.c
+@@ -394,3 +394,24 @@ void dynamic_maint(struct dynamic_pool *pool, int shutdown)
+ 		}
+ 	}
+ }
++
++void dynamic_free(struct dynamic_pool *pool)
++{
++	struct list_head *entry, *next;
++	struct map_dynamic *d;
++
++	list_for_each_safe(entry, next, &pool->mapped_list) {
++		d = list_entry(entry, struct map_dynamic, list);
++		free(d);
++	}
++	list_for_each_safe(entry, next, &pool->dormant_list) {
++		d = list_entry(entry, struct map_dynamic, list);
++		free(d);
++	}
++	list_for_each_safe(entry, next, &pool->free_list) {
++		d = list_entry(entry, struct map_dynamic, list);
++		free(d);
++	}
++
++	free(pool);
++}
+diff --git a/tayga.c b/tayga.c
+index fbd2e64..c5d8d24 100644
+--- a/tayga.c
++++ b/tayga.c
+@@ -248,6 +248,7 @@ static void read_from_signalfd(void)
+ 		if (gcfg->dynamic_pool)
+ 			dynamic_maint(gcfg->dynamic_pool, 1);
+ 		slog(LOG_NOTICE, "exiting on signal %d\n", sig);
++		free_config(gcfg);
+ 		exit(0);
+ 	}
+ }
+diff --git a/tayga.h b/tayga.h
+index 2284d2a..a670d45 100644
+--- a/tayga.h
++++ b/tayga.h
+@@ -215,6 +215,7 @@ struct config {
+ 	uint8_t *recv_buf;
+ 
+ 	uint32_t rand[8];
++	struct cache_entry *cache_start;
+ 	struct list_head cache_pool;
+ 	struct list_head cache_active;
+ 	time_t last_cache_maint;
+@@ -255,6 +256,7 @@ int is_private_ip4_addr(const struct in_addr *a);
+ int calc_ip4_mask(struct in_addr *mask, const struct in_addr *addr, int len);
+ int calc_ip6_mask(struct in6_addr *mask, const struct in6_addr *addr, int len);
+ void create_cache(void);
++void free_cache(struct config *cfg);
+ int insert_map4(struct map4 *m, struct map4 **conflict);
+ int insert_map6(struct map6 *m, struct map6 **conflict);
+ struct map4 *find_map4(const struct in_addr *addr4);
+@@ -269,11 +271,13 @@ void addrmap_maint(void);
+ 
+ /* conffile.c */
+ void read_config(char *conffile);
++void free_config(struct config *cfg);
+ 
+ /* dynamic.c */
+ struct map6 *assign_dynamic(const struct in6_addr *addr6);
+ void load_dynamic(struct dynamic_pool *pool);
+ void dynamic_maint(struct dynamic_pool *pool, int shutdown);
++void dynamic_free(struct dynamic_pool *pool);
+ 
+ /* nat64.c */
+ void handle_ip4(struct pkt *p);
+-- 
+2.21.0
+
